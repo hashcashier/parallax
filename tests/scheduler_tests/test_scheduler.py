@@ -381,3 +381,56 @@ def test_complicated_rr():
     # REBOOT
     assert sched.node_manager.num_active_nodes == 2
     assert sched.node_manager.num_standby_nodes == 0
+
+
+def test_rr_routing_recovers_after_late_rtt_measurements():
+    """RR pipeline registration races heartbeat data (central-scheduler mode).
+
+    Bootstrap fires the moment the Nth node joins — before any node<->node RTT
+    exists when nodes only dial the scheduler (no shared public DHT). Every
+    multi-node pipeline then scores an infinite latency, ZERO pipelines register,
+    and routing_ready() stays False forever while a perfectly healthy cluster
+    503s. _try_recover_routing() must register the pipelines once heartbeats
+    deliver the missing measurements.
+    """
+    model = build_model_info(12)
+    # 32GB nodes cannot host the model alone: only multi-node pipelines exist, so
+    # every candidate pipeline needs node<->node RTTs to score finite.
+    nodes = [
+        build_node(f"n{i}", model, tflops=312.0, mem_gb=32.0, x=float(i), y=0.0)
+        for i in range(3)
+    ]
+    # NOTE: no set_rtt_from_coords() before bootstrap — joins carry only what a
+    # freshly-started worker has measured (nothing between workers yet).
+    sched = Scheduler(
+        model, nodes, strategy="dp", routing_strategy="rr", min_nodes_bootstrapping=3
+    )
+    assert sched.bootstrap()
+    # The bug: allocation succeeded, but registration was data-starved.
+    assert not sched.node_manager.get_registered_pipeline_node_ids()
+    assert not sched.request_router.routing_ready()
+
+    # Heartbeats deliver latencies/RTTs moments later...
+    set_rtt_from_coords(nodes)
+    sched._try_recover_routing()
+
+    # ...and routing self-heals without a reboot.
+    assert sched.node_manager.get_registered_pipeline_node_ids()
+    assert sched.request_router.routing_ready()
+
+
+def test_routing_recovery_is_noop_when_pipelines_registered():
+    """Recovery must never clear/re-register an existing (live) pipeline set."""
+    model = build_model_info(12)
+    n1 = build_node("a100-0", model, tflops=312.0, mem_gb=80.0, x=0, y=0)
+    n2 = build_node("a100-1", model, tflops=312.0, mem_gb=80.0, x=1, y=0)
+    set_rtt_from_coords([n1, n2])
+    sched = Scheduler(
+        model, [n1, n2], strategy="greedy", routing_strategy="rr", min_nodes_bootstrapping=1
+    )
+    assert sched.bootstrap()
+    before = sched.node_manager.get_registered_pipeline_node_ids()
+    assert before
+
+    sched._try_recover_routing()
+    assert sched.node_manager.get_registered_pipeline_node_ids() == before

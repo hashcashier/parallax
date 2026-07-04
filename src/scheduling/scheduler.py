@@ -25,6 +25,10 @@ from scheduling.request_routing import (
 
 logger = get_logger(__name__)
 
+# How often the event loop re-attempts request-router registration while the
+# scheduler is bootstrapped but routing is not ready (see _try_recover_routing).
+ROUTING_RECOVER_INTERVAL_S = 5.0
+
 
 class Scheduler:
     """Coordinates allocation, node materialization, and request routing."""
@@ -193,6 +197,45 @@ class Scheduler:
         # Snapshot at INFO after bootstrap since allocations/pipelines may have materially changed.
         self.emit_alloc_log_snapshot(reason="Post Bootstrap")
         return True
+
+    def _try_recover_routing(self) -> None:
+        """Re-attempt request-router registration after a data-starved bootstrap.
+
+        Fixed-pipeline routers (rr) register their pipeline set exactly once, inside
+        `bootstrap()` — which fires the moment the Nth node joins. In central-scheduler
+        deployments without a shared public DHT (e.g. `parallax join -s <multiaddr>`),
+        joining nodes have only ever measured RTT to the scheduler at that point, so
+        every multi-node pipeline scores an infinite latency in
+        `estimate_pipeline_latency`, nothing is registered, and `routing_ready()`
+        stays False forever — even though the executors finish loading and node
+        heartbeats deliver the missing latencies/RTTs moments later. Requests then
+        503 indefinitely on an otherwise healthy cluster.
+
+        Re-running the router's registration once that data has arrived makes routing
+        self-healing. Deliberately a no-op when any pipeline is already registered:
+        re-registering would clear live registrations (and detach their nodes), and a
+        registered-but-not-ready pipeline (e.g. a member briefly inactive) is the
+        leave/rebalance machinery's job, not ours.
+
+        Must be called from the event-loop thread — the same thread that processes
+        joins and runs bootstrap — so registration never races join processing.
+        """
+        if self.request_router.routing_ready():
+            return
+        if self.node_manager.get_registered_pipeline_node_ids():
+            return
+        try:
+            registered = self.request_router.bootstrap()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(f"[Router] routing recovery attempt failed: {exc}")
+            return
+        if registered:
+            logger.info(
+                "[Router] late pipeline registration succeeded: %d pipeline(s) "
+                "registered once node latencies/RTTs arrived",
+                len(registered),
+            )
+            self.emit_alloc_log_snapshot(reason="Routing recovered")
 
     def update_last_refit_time(self):
         min_refit_time = None
@@ -486,6 +529,7 @@ class Scheduler:
     def _event_loop(self, poll_interval: float) -> None:
         """Process joins/leaves/updates and perform heartbeat checks."""
         last_hb_check = 0.0
+        last_routing_recover = 0.0
         while not self._stop_event.is_set():
             self._process_node_updates()
             self._process_joins()
@@ -494,6 +538,14 @@ class Scheduler:
             if now - last_hb_check >= max(0.5, poll_interval):
                 self.checking_node_heartbeat()
                 last_hb_check = now
+            # Routing can bootstrap data-starved (see _try_recover_routing); retry
+            # registration periodically until heartbeats make it succeed.
+            if (
+                self._bootstrapped_event.is_set()
+                and now - last_routing_recover >= ROUTING_RECOVER_INTERVAL_S
+            ):
+                self._try_recover_routing()
+                last_routing_recover = now
             self._wake_event.wait(timeout=poll_interval)
             self._wake_event.clear()
 
