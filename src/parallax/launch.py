@@ -135,6 +135,7 @@ if __name__ == "__main__":
             if not (args.start_layer == 0 and args.end_layer == config.get("num_hidden_layers")):
                 p2p_server_process = launch_p2p_server_process(
                     initial_peers=args.initial_peers,
+                    key_path=args.key_path,
                     scheduler_addr=args.scheduler_addr,
                     relay_servers=args.relay_servers,
                     pp_start_layer=args.start_layer,
@@ -193,6 +194,7 @@ if __name__ == "__main__":
             # Pass dict to subprocess (multiprocessing requires serializable objects)
             p2p_server_process = launch_p2p_server_process(
                 initial_peers=args.initial_peers,
+                key_path=args.key_path,
                 scheduler_addr=args.scheduler_addr,
                 relay_servers=args.relay_servers,
                 pp_start_layer=args.start_layer,

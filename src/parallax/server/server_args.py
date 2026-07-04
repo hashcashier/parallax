@@ -34,6 +34,12 @@ def parse_args() -> argparse.Namespace:
 
     # Lattica configuration
     parser.add_argument("--initial-peers", nargs="+", default=[], help="List of initial DHT peers")
+    parser.add_argument(
+        "--key-path",
+        type=str,
+        default=None,
+        help="Directory holding p2p.key for a stable Lattica identity across restarts",
+    )
     parser.add_argument("--scheduler-addr", type=str, default=None, help="Scheduler address")
     parser.add_argument("--relay-servers", nargs="+", default=[], help="List of relay DHT peers")
     parser.add_argument("--tcp-port", type=int, default=0, help="Port for Lattica TCP listening")

@@ -350,6 +350,7 @@ class GradientServer:
         recv_from_peer_addr: str,
         send_to_peer_addr: str,
         initial_peers: List[str] = [],
+        key_path: Optional[str] = None,
         scheduler_addr: Optional[str] = None,
         relay_servers: List[str] = [],
         block_start_index: int = 0,
@@ -372,6 +373,7 @@ class GradientServer:
         self.recv_from_peer_addr = recv_from_peer_addr
         self.send_to_peer_addr = send_to_peer_addr
         self.initial_peers = initial_peers
+        self.key_path = key_path
         self.scheduler_addr = scheduler_addr
         self.relay_servers = relay_servers
         self.block_start_index = block_start_index
@@ -448,10 +450,22 @@ class GradientServer:
     def build_lattica(self):
         self.lattica = Lattica.builder().with_listen_addrs(self.host_maddrs)
 
+        if self.key_path:
+            # Stable identity across restarts: a relaunched worker rejoins under the
+            # SAME peer id instead of churning ghost nodes in the scheduler, and
+            # deployments can pre-compute peer multiaddrs (e.g. to full-mesh workers
+            # via --initial-peers when there is no shared public DHT).
+            logger.info(f"Using key path: {self.key_path}")
+            self.lattica.with_key_path(self.key_path)
+
+        # Collect ALL bootstrap peers into a single with_bootstraps call: the builder
+        # setter replaces rather than appends, so calling it twice (scheduler addr,
+        # then --initial-peers) silently dropped the earlier list.
+        bootstraps: List[str] = []
         if self.scheduler_addr is not None and self.scheduler_addr != "auto":
             if self.scheduler_addr.startswith("/"):
                 logger.info(f"Using scheduler addr: {self.scheduler_addr}")
-                self.lattica.with_bootstraps([self.scheduler_addr])
+                bootstraps.append(self.scheduler_addr)
             self.scheduler_peer_id = self.scheduler_addr.split("/")[-1]
 
         if len(self.relay_servers) > 0:
@@ -467,7 +481,10 @@ class GradientServer:
 
         if len(self.initial_peers) > 0:
             logger.info(f"Using initial peers: {self.initial_peers}")
-            self.lattica.with_bootstraps(self.initial_peers)
+            bootstraps.extend(a for a in self.initial_peers if a not in bootstraps)
+
+        if bootstraps:
+            self.lattica.with_bootstraps(bootstraps)
 
         self.lattica.build()
 
@@ -977,6 +994,7 @@ class GradientServer:
 
 def _run_p2p_server_process(
     initial_peers: List[str],
+    key_path: Optional[str],
     scheduler_addr: Optional[str],
     relay_servers: List[str],
     pp_start_layer: int,
@@ -1010,6 +1028,7 @@ def _run_p2p_server_process(
             recv_from_peer_addr=recv_from_peer_addr,
             send_to_peer_addr=send_to_peer_addr,
             initial_peers=initial_peers,
+            key_path=key_path,
             scheduler_addr=scheduler_addr,
             relay_servers=relay_servers,
             block_start_index=pp_start_layer,
@@ -1059,6 +1078,7 @@ def _run_p2p_server_process(
 
 def launch_p2p_server_process(
     initial_peers: List[str],
+    key_path: Optional[str],
     scheduler_addr: Optional[str],
     relay_servers: List[str],
     pp_start_layer: int,
@@ -1094,6 +1114,7 @@ def launch_p2p_server_process(
         target=_run_p2p_server_process,
         args=(
             initial_peers,
+            key_path,
             scheduler_addr,
             relay_servers,
             pp_start_layer,
