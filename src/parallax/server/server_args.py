@@ -40,6 +40,14 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Directory holding p2p.key for a stable Lattica identity across restarts",
     )
+    parser.add_argument(
+        "--join-timeout",
+        type=int,
+        default=300,
+        help="Seconds a worker waits for the scheduler's bootstrap/layer allocation "
+             "before giving up; 0 or negative waits forever (needed at scale where all "
+             "N workers cannot node_join within a fixed window).",
+    )
     parser.add_argument("--scheduler-addr", type=str, default=None, help="Scheduler address")
     parser.add_argument("--relay-servers", nargs="+", default=[], help="List of relay DHT peers")
     parser.add_argument("--tcp-port", type=int, default=0, help="Port for Lattica TCP listening")

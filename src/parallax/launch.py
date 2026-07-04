@@ -136,6 +136,8 @@ if __name__ == "__main__":
                 p2p_server_process = launch_p2p_server_process(
                     initial_peers=args.initial_peers,
                     key_path=args.key_path,
+                join_timeout=args.join_timeout,
+                    join_timeout=args.join_timeout,
                     scheduler_addr=args.scheduler_addr,
                     relay_servers=args.relay_servers,
                     pp_start_layer=args.start_layer,
@@ -222,7 +224,9 @@ if __name__ == "__main__":
 
             # Wait for layer allocation from scheduler (via shared state)
             logger.debug("Waiting for layer allocation from scheduler...")
-            max_wait_time = 300  # 5 minutes
+            # 0/negative -> wait forever (see --join-timeout): big-shard fleets need
+            # far longer than 5 min for all workers to bootstrap + get their allocation.
+            max_wait_time = args.join_timeout
             wait_start = time.time()
             while True:
                 model_info = shared_state.get_model_info()
@@ -232,7 +236,7 @@ if __name__ == "__main__":
                     and model_info["model_name"] is not None
                 ):
                     break
-                if time.time() - wait_start > max_wait_time:
+                if max_wait_time and max_wait_time > 0 and time.time() - wait_start > max_wait_time:
                     logger.error("Timeout waiting for layer allocation from scheduler")
                     raise RuntimeError("Failed to get layer allocation from scheduler")
                 time.sleep(1)

@@ -351,6 +351,7 @@ class GradientServer:
         send_to_peer_addr: str,
         initial_peers: List[str] = [],
         key_path: Optional[str] = None,
+        join_timeout: int = 300,
         scheduler_addr: Optional[str] = None,
         relay_servers: List[str] = [],
         block_start_index: int = 0,
@@ -374,6 +375,7 @@ class GradientServer:
         self.send_to_peer_addr = send_to_peer_addr
         self.initial_peers = initial_peers
         self.key_path = key_path
+        self.join_timeout = join_timeout
         self.scheduler_addr = scheduler_addr
         self.relay_servers = relay_servers
         self.block_start_index = block_start_index
@@ -546,7 +548,11 @@ class GradientServer:
                     node_info["manual_layer_assignment"] = True
 
                 response = self.scheduler_stub.node_join(node_info)
-                response = response.result(timeout=300)
+                # 0/negative -> wait forever: at scale (8+ nodes, big shards) workers
+                # cannot all node_join within a fixed window; the scheduler holds each
+                # response until bootstrap, so a hard timeout kills healthy late joiners.
+                _jt = self.join_timeout if self.join_timeout and self.join_timeout > 0 else None
+                response = response.result(timeout=_jt)
                 if response == {}:
                     logger.error("Failed to join scheduler")
                     exit(1)
@@ -995,6 +1001,7 @@ class GradientServer:
 def _run_p2p_server_process(
     initial_peers: List[str],
     key_path: Optional[str],
+    join_timeout: int,
     scheduler_addr: Optional[str],
     relay_servers: List[str],
     pp_start_layer: int,
@@ -1029,6 +1036,7 @@ def _run_p2p_server_process(
             send_to_peer_addr=send_to_peer_addr,
             initial_peers=initial_peers,
             key_path=key_path,
+            join_timeout=join_timeout,
             scheduler_addr=scheduler_addr,
             relay_servers=relay_servers,
             block_start_index=pp_start_layer,
@@ -1079,6 +1087,7 @@ def _run_p2p_server_process(
 def launch_p2p_server_process(
     initial_peers: List[str],
     key_path: Optional[str],
+    join_timeout: int,
     scheduler_addr: Optional[str],
     relay_servers: List[str],
     pp_start_layer: int,
@@ -1115,6 +1124,7 @@ def launch_p2p_server_process(
         args=(
             initial_peers,
             key_path,
+            join_timeout,
             scheduler_addr,
             relay_servers,
             pp_start_layer,
