@@ -56,6 +56,12 @@ from scheduling.node_management import NodeManager
 
 logger = get_logger(__name__)
 
+# Default hop cost substituted for MISSING node<->node RTTs when scoring pipelines
+# that must not be rejected for unmeasurable hops (registration recovery and
+# round-robin dispatch over already-registered pipelines). Mirrors the convention
+# workers apply to peers they discover but fail to measure.
+DEFAULT_MISSING_RTT_MS = 100.0
+
 
 def estimate_pipeline_latency(
     pipeline_node_ids: List[str],
@@ -824,7 +830,12 @@ class RoundRobinOverFixedPipelinesRouting(RequestRoutingStrategy):
         """Return the next viable *registered* pipeline in round-robin order.
 
         Returns ([], inf) if nothing is registered or if all registered pipelines
-        are currently invalid due to overload/missing RTT/missing nodes.
+        are currently invalid due to overload/inactive members/stale weights.
+        Registration already vetted pipeline membership, so a MISSING node<->node
+        RTT does not invalidate a registered pipeline at dispatch time — it scores
+        with DEFAULT_MISSING_RTT_MS instead (deployments whose data plane connects
+        workers outside the DHT peer store never produce those measurements, and
+        strict dispatch scoring would starve every request on a healthy cluster).
         """
         pipelines = self.node_manager.get_registered_pipelines()
         if not pipelines:
@@ -849,7 +860,9 @@ class RoundRobinOverFixedPipelinesRouting(RequestRoutingStrategy):
                 logger.warning(f"Pipeline {candidate} is not ready, skipping")
                 continue
 
-            latency = estimate_pipeline_latency(candidate, id_to_node=id_to_node)
+            latency = estimate_pipeline_latency(
+                candidate, id_to_node=id_to_node, default_rtt_ms=DEFAULT_MISSING_RTT_MS
+            )
             for nid in candidate:
                 if nid not in id_to_node:
                     raise ValueError(

@@ -19,6 +19,7 @@ from scheduling.model_info import ModelInfo
 from scheduling.node import Node, RequestSignal
 from scheduling.node_management import NodeManager
 from scheduling.request_routing import (
+    DEFAULT_MISSING_RTT_MS,
     DynamicProgrammingRouting,
     RoundRobinOverFixedPipelinesRouting,
 )
@@ -28,14 +29,12 @@ logger = get_logger(__name__)
 # How often the event loop re-attempts request-router registration while the
 # scheduler is bootstrapped but routing is not ready (see _try_recover_routing).
 ROUTING_RECOVER_INTERVAL_S = 5.0
-# After this many strict recovery attempts, retry with a default cost for MISSING
-# node<->node RTTs. In central-scheduler mode without a shared public DHT the
-# inference data plane connects workers outside the DHT peer store, so their
+# After this many strict recovery attempts, retry with DEFAULT_MISSING_RTT_MS for
+# MISSING node<->node RTTs. In central-scheduler mode without a shared public DHT
+# the inference data plane connects workers outside the DHT peer store, so their
 # heartbeats never carry node<->node RTTs and strict scoring would reject every
-# multi-node pipeline forever. 100ms mirrors the workers' own convention for
-# discovered-but-unmeasured peers.
+# multi-node pipeline forever.
 ROUTING_RECOVER_RELAX_AFTER = 6
-DEFAULT_MISSING_RTT_MS = 100.0
 
 
 class Scheduler:

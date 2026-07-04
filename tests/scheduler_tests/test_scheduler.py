@@ -465,3 +465,13 @@ def test_rr_routing_relaxes_to_default_rtt_when_measurements_never_arrive():
     sched._try_recover_routing()
     assert sched.node_manager.get_registered_pipeline_node_ids()
     assert sched.request_router.routing_ready()
+
+    # Dispatch must also tolerate the missing RTTs (observed live: registration
+    # succeeded but strict per-request scoring starved every completion with
+    # 'All pipelines are busy or not ready').
+    req = RequestSignal(request_id="req-relaxed")
+    sched.receive_request(req)
+    assignment = sched.dispatch_next_request()
+    assert assignment is not None
+    _, path, latency = assignment
+    assert path and latency != float("inf")
