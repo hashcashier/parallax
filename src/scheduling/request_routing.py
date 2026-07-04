@@ -58,11 +58,21 @@ logger = get_logger(__name__)
 
 
 def estimate_pipeline_latency(
-    pipeline_node_ids: List[str], *, id_to_node: Dict[str, Node]
+    pipeline_node_ids: List[str],
+    *,
+    id_to_node: Dict[str, Node],
+    default_rtt_ms: Optional[float] = None,
 ) -> float:
     """Estimate end-to-end latency for a node-id pipeline.
 
     Returns `inf` if any node is missing, overloaded, or if any required RTT is missing.
+
+    `default_rtt_ms` (when given) substitutes for MISSING hop RTTs instead of scoring
+    the pipeline `inf`. Nodes that only ever dial the scheduler (central-scheduler
+    mode without a shared public DHT) never measure node<->node RTTs — their inference
+    data plane connects peers outside the DHT's peer store — so requiring measured
+    RTTs would reject every multi-node pipeline forever. Workers apply the same
+    convention for peers they discover but fail to measure (100ms).
     """
     total = 0.0
     prev: Optional[Node] = None
@@ -77,7 +87,9 @@ def estimate_pipeline_latency(
         if prev is not None:
             hop = 0.0 if prev.node_id == n.node_id else float(prev.get_rtt_to(n))
             if hop == float("inf"):
-                return float("inf")
+                if default_rtt_ms is None:
+                    return float("inf")
+                hop = float(default_rtt_ms)
             total += hop
         prev = n
     return total
@@ -199,7 +211,7 @@ class RequestRoutingStrategy(ABC):
         """
         raise NotImplementedError
 
-    def bootstrap(self) -> None:
+    def bootstrap(self, default_rtt_ms: Optional[float] = None) -> None:
         """Optional bootstrap for best-effort initialization."""
         return None
 
@@ -587,7 +599,10 @@ class RoundRobinOverFixedPipelinesRouting(RequestRoutingStrategy):
         self.layer_allocator = layer_allocator
 
     def _select_best_pipelines(
-        self, all_pipelines: List[List[str]], nodes: List[Node]
+        self,
+        all_pipelines: List[List[str]],
+        nodes: List[Node],
+        default_rtt_ms: Optional[float] = None,
     ) -> List[List[str]]:
         """Helper: Select best node-disjoint pipelines minimizing latency.
 
@@ -608,7 +623,9 @@ class RoundRobinOverFixedPipelinesRouting(RequestRoutingStrategy):
             if len(set(p)) != len(p):
                 continue
             head = p[0]
-            cost = estimate_pipeline_latency(p, id_to_node=id_to_node)
+            cost = estimate_pipeline_latency(
+                p, id_to_node=id_to_node, default_rtt_ms=default_rtt_ms
+            )
 
             if cost != float("inf"):
                 by_head.setdefault(head, []).append((p, cost))
@@ -648,7 +665,7 @@ class RoundRobinOverFixedPipelinesRouting(RequestRoutingStrategy):
         )
         return selected
 
-    def bootstrap(self) -> Dict[int, List[str]]:
+    def bootstrap(self, default_rtt_ms: Optional[float] = None) -> Dict[int, List[str]]:
         """Search → score → register a fixed set of pipelines.
 
         Args:
@@ -659,6 +676,8 @@ class RoundRobinOverFixedPipelinesRouting(RequestRoutingStrategy):
                 no node id appears in more than one registered pipeline.
             skip_overloaded_at_register: If True, exclude pipelines that are
                 already invalid due to overloaded nodes at registration time.
+            default_rtt_ms: Substitute for MISSING node<->node RTTs during scoring
+                instead of rejecting the pipeline (see estimate_pipeline_latency).
         """
         existing = self.node_manager.get_registered_pipeline_node_ids()
         if existing:
@@ -676,7 +695,9 @@ class RoundRobinOverFixedPipelinesRouting(RequestRoutingStrategy):
         if not all_pipelines:
             return {}
         # Score: based on estimated latency
-        selected_pipelines = self._select_best_pipelines(all_pipelines, nodes)
+        selected_pipelines = self._select_best_pipelines(
+            all_pipelines, nodes, default_rtt_ms=default_rtt_ms
+        )
         return self.node_manager.register_pipelines(selected_pipelines)
 
     def clear_registered_pipelines(self) -> None:

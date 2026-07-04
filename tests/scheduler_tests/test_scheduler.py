@@ -434,3 +434,34 @@ def test_routing_recovery_is_noop_when_pipelines_registered():
 
     sched._try_recover_routing()
     assert sched.node_manager.get_registered_pipeline_node_ids() == before
+
+
+def test_rr_routing_relaxes_to_default_rtt_when_measurements_never_arrive():
+    """Deployments whose data plane connects workers outside the DHT peer store never
+    measure node<->node RTTs at all — strict recovery alone would retry forever. After
+    ROUTING_RECOVER_RELAX_AFTER strict attempts, recovery must register pipelines
+    using DEFAULT_MISSING_RTT_MS for the missing hops.
+    """
+    from scheduling.scheduler import ROUTING_RECOVER_RELAX_AFTER
+
+    model = build_model_info(12)
+    # 32GB nodes cannot host the model alone: only multi-node pipelines exist.
+    nodes = [
+        build_node(f"n{i}", model, tflops=312.0, mem_gb=32.0, x=float(i), y=0.0)
+        for i in range(3)
+    ]
+    sched = Scheduler(
+        model, nodes, strategy="dp", routing_strategy="rr", min_nodes_bootstrapping=3
+    )
+    assert sched.bootstrap()
+    assert not sched.node_manager.get_registered_pipeline_node_ids()
+
+    # RTTs never arrive: strict attempts stay empty...
+    for _ in range(ROUTING_RECOVER_RELAX_AFTER):
+        sched._try_recover_routing()
+        assert not sched.node_manager.get_registered_pipeline_node_ids()
+
+    # ...and the next attempt relaxes to the default hop cost and registers.
+    sched._try_recover_routing()
+    assert sched.node_manager.get_registered_pipeline_node_ids()
+    assert sched.request_router.routing_ready()

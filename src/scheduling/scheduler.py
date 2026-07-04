@@ -28,6 +28,14 @@ logger = get_logger(__name__)
 # How often the event loop re-attempts request-router registration while the
 # scheduler is bootstrapped but routing is not ready (see _try_recover_routing).
 ROUTING_RECOVER_INTERVAL_S = 5.0
+# After this many strict recovery attempts, retry with a default cost for MISSING
+# node<->node RTTs. In central-scheduler mode without a shared public DHT the
+# inference data plane connects workers outside the DHT peer store, so their
+# heartbeats never carry node<->node RTTs and strict scoring would reject every
+# multi-node pipeline forever. 100ms mirrors the workers' own convention for
+# discovered-but-unmeasured peers.
+ROUTING_RECOVER_RELAX_AFTER = 6
+DEFAULT_MISSING_RTT_MS = 100.0
 
 
 class Scheduler:
@@ -120,6 +128,8 @@ class Scheduler:
         self.alloc_log_snapshot: str = ""
         # Avoid spamming: only emit the "all nodes active" INFO log on transitions.
         self._all_nodes_active_logged: bool = False
+        # Strict routing-recovery attempts so far (see _try_recover_routing).
+        self._routing_recover_attempts: int = 0
         logger.info(
             f"Scheduler initialized, min_nodes_bootstrapping {self.min_nodes_bootstrapping}, "
             f"Layer allocations trategy {strategy}, Request routing strategy {routing_strategy}."
@@ -217,24 +227,38 @@ class Scheduler:
         registered-but-not-ready pipeline (e.g. a member briefly inactive) is the
         leave/rebalance machinery's job, not ours.
 
+        After ROUTING_RECOVER_RELAX_AFTER strict attempts, missing node<->node RTTs
+        are substituted with DEFAULT_MISSING_RTT_MS instead of rejecting pipelines:
+        deployments whose data plane connects workers outside the DHT peer store
+        never produce those measurements at all, and registering with a conservative
+        hop estimate beats refusing to serve a healthy cluster.
+
         Must be called from the event-loop thread — the same thread that processes
         joins and runs bootstrap — so registration never races join processing.
         """
         if self.request_router.routing_ready():
+            self._routing_recover_attempts = 0
             return
         if self.node_manager.get_registered_pipeline_node_ids():
             return
+        self._routing_recover_attempts += 1
+        relax = self._routing_recover_attempts > ROUTING_RECOVER_RELAX_AFTER
         try:
-            registered = self.request_router.bootstrap()
+            registered = self.request_router.bootstrap(
+                default_rtt_ms=DEFAULT_MISSING_RTT_MS if relax else None
+            )
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(f"[Router] routing recovery attempt failed: {exc}")
             return
         if registered:
             logger.info(
                 "[Router] late pipeline registration succeeded: %d pipeline(s) "
-                "registered once node latencies/RTTs arrived",
+                "registered (%s) after %d attempt(s)",
                 len(registered),
+                "default cost for unmeasured RTTs" if relax else "measured RTTs",
+                self._routing_recover_attempts,
             )
+            self._routing_recover_attempts = 0
             self.emit_alloc_log_snapshot(reason="Routing recovered")
 
     def update_last_refit_time(self):
