@@ -275,6 +275,47 @@ class BaseLayerAllocator:
         )
         return decision
 
+    def _snap_boundaries_to_indexer(self, bounds: List[int]) -> List[int]:
+        """Snap interior pipeline boundaries onto valid GLM-DSA shard-start layers.
+
+        For `glm_moe_dsa` models (e.g. GLM-5.2) a pipeline shard may only START at layer 0
+        or a "full" indexer layer, because Parallax does not transfer DSA top-k across
+        nodes (see DeepseekV32ForCausalLM.validate_shard_start / shard_loader). The
+        capacity-based allocators here are DSA-blind and can place a boundary on a "shared"
+        layer, which mis-shapes the indexer tensors and makes every worker assert-and-die at
+        weight load (observed on multi-node GLM-5.2). `bounds` is the contiguous boundary
+        list [0, b1, ..., num_total_layers]; endpoints stay fixed and each interior boundary
+        is moved to the nearest valid full-indexer layer, kept strictly increasing with room
+        for the remaining boundaries. No-op when the model exposes no valid_shard_starts
+        (non-DSA models) or when a safe snap is impossible (returns bounds unchanged; the
+        loader's validate_shard_start remains the backstop).
+        """
+        valid = getattr(self.model_info, "valid_shard_starts", None)
+        if not valid or len(bounds) <= 2:
+            return bounds
+        total = self.num_total_layers
+        vs = sorted(v for v in set(valid) if 0 < v < total)
+        if not vs:
+            return bounds
+        out = [bounds[0]]
+        n_interior = len(bounds) - 2
+        for i in range(1, len(bounds) - 1):
+            remaining_after = n_interior - i  # interior boundaries still to place after this
+            cands = [v for v in vs if v > out[-1] and v <= total - 1 - remaining_after]
+            if not cands:
+                logger.warning(
+                    "[LayerAllocator] could not snap boundary %d to a GLM-DSA full-indexer "
+                    "layer; leaving unsnapped (loader validates).", bounds[i])
+                return bounds
+            out.append(min(cands, key=lambda v: (abs(v - bounds[i]), v)))
+        out.append(bounds[-1])
+        if any(out[k] >= out[k + 1] for k in range(len(out) - 1)):
+            return bounds
+        if out != bounds:
+            logger.info("[LayerAllocator] snapped GLM-DSA shard boundaries %s -> %s",
+                        bounds, out)
+        return out
+
     def adjust_pipeline_layers(
         self,
         pipeline_nodes: List[Node],
@@ -382,16 +423,16 @@ class BaseLayerAllocator:
                 stage_layer_counts[i] += take
                 extra -= take
 
-        # Apply contiguous assignments in stage order directly to nodes
-        start_layer = 0
-        for idx, node in enumerate(nodes):
-            layers = stage_layer_counts[idx]
-            if layers <= 0:
-                # TODO(chris-t): should we deallocate the node?
-                continue
-            end_layer = start_layer + layers
-            self.allocate(node, start_layer, end_layer)
-            start_layer = end_layer
+        # Build contiguous boundaries from the water-filled counts, snap interior boundaries
+        # to valid GLM-DSA full-indexer layers (no-op for non-DSA models), then assign.
+        active = [(idx, node) for idx, node in enumerate(nodes) if stage_layer_counts[idx] > 0]
+        bounds = [0]
+        for idx, _ in active:
+            bounds.append(bounds[-1] + stage_layer_counts[idx])
+        bounds = self._snap_boundaries_to_indexer(bounds)
+        for k, (_, node) in enumerate(active):
+            self.allocate(node, bounds[k], bounds[k + 1])
+        start_layer = bounds[-1]
 
         # Sanity check: ensure coverage from 0..num_total_layers
         if start_layer != total_layers:
@@ -424,8 +465,11 @@ class BaseLayerAllocator:
             if node.start_layer is not None and node.end_layer is not None:
                 self.deallocate(node)
 
+        # First pass: compute contiguous per-node layer counts by capacity (no allocation yet,
+        # so we can snap boundaries to GLM-DSA full-indexer layers before assigning).
         start_layer = 0
         remaining_layers = total_layers
+        counts: List[Tuple[Node, int]] = []
 
         for idx, node in enumerate(pipeline_nodes):
             include_input_embed = start_layer == 0
@@ -445,9 +489,8 @@ class BaseLayerAllocator:
             if assign_layers <= 0:
                 continue
 
-            end_layer = start_layer + assign_layers
-            self.allocate(node, start_layer, end_layer)
-            start_layer = end_layer
+            counts.append((node, assign_layers))
+            start_layer += assign_layers
             remaining_layers -= assign_layers
 
             if remaining_layers == 0:
@@ -457,6 +500,15 @@ class BaseLayerAllocator:
             raise ValueError(
                 f"Greedy assignment did not cover all layers: remaining {remaining_layers}"
             )
+
+        # Build boundaries, snap interior boundaries to valid GLM-DSA full-indexer layers
+        # (no-op for non-DSA models), then assign contiguous ranges.
+        bounds = [0]
+        for _, c in counts:
+            bounds.append(bounds[-1] + c)
+        bounds = self._snap_boundaries_to_indexer(bounds)
+        for k, (node, _) in enumerate(counts):
+            self.allocate(node, bounds[k], bounds[k + 1])
 
     def adjust_for_turning_points(self, num_layers: int) -> List[Tuple[str, int, str]]:
         """Find truncation points (warm-up helper).

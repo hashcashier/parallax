@@ -174,6 +174,18 @@ def get_model_info(model_name, use_hfcache: bool = False):
         num_experts_per_tok=config.get("num_experts_per_tok", None),
         moe_intermediate_dim=config.get("moe_intermediate_size", None),
     )
+    # GLM-MoE-DSA (glm_moe_dsa, e.g. GLM-5.2): a pipeline shard may only START at layer 0 or
+    # a "full" indexer layer, because Parallax does not transfer DSA top-k across nodes (see
+    # DeepseekV32ForCausalLM.validate_shard_start / shard_loader). The layer allocator is
+    # otherwise DSA-blind and water-fills by capacity, so it can place a shard boundary on a
+    # "shared" layer -> the indexer tensors mis-shape and every worker asserts-and-dies at
+    # weight load (GLM-5.2 multi-node). Expose the valid full-indexer starts so the allocator
+    # can snap boundaries onto them. None for non-DSA models (no constraint).
+    valid_shard_starts = None
+    indexer_types = config.get("indexer_types")
+    if indexer_types:
+        valid_shard_starts = sorted({0} | {i for i, t in enumerate(indexer_types) if t == "full"})
+    model_info.valid_shard_starts = valid_shard_starts
     return model_info
 
 
