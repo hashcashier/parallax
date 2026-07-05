@@ -136,7 +136,6 @@ if __name__ == "__main__":
                 p2p_server_process = launch_p2p_server_process(
                     initial_peers=args.initial_peers,
                     key_path=args.key_path,
-                join_timeout=args.join_timeout,
                     join_timeout=args.join_timeout,
                     scheduler_addr=args.scheduler_addr,
                     relay_servers=args.relay_servers,
@@ -197,6 +196,7 @@ if __name__ == "__main__":
             p2p_server_process = launch_p2p_server_process(
                 initial_peers=args.initial_peers,
                 key_path=args.key_path,
+                join_timeout=args.join_timeout,
                 scheduler_addr=args.scheduler_addr,
                 relay_servers=args.relay_servers,
                 pp_start_layer=args.start_layer,
