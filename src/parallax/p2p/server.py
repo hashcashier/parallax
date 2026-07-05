@@ -548,10 +548,14 @@ class GradientServer:
                     node_info["manual_layer_assignment"] = True
 
                 response = self.scheduler_stub.node_join(node_info)
-                # 0/negative -> wait forever: at scale (8+ nodes, big shards) workers
+                # 0/negative -> wait "forever": at scale (8+ nodes, big shards) workers
                 # cannot all node_join within a fixed window; the scheduler holds each
                 # response until bootstrap, so a hard timeout kills healthy late joiners.
-                _jt = self.join_timeout if self.join_timeout and self.join_timeout > 0 else None
+                # lattica's result(timeout=) is a SECONDS int and REJECTS None
+                # ('NoneType' cannot be interpreted as an integer), so "disabled" means a
+                # large finite wait — 1 year, well beyond any bootstrap and safe from
+                # deadline overflow. Driver-side liveness sweeps catch a genuinely dead ring.
+                _jt = self.join_timeout if self.join_timeout and self.join_timeout > 0 else 31536000
                 response = response.result(timeout=_jt)
                 if response == {}:
                     logger.error("Failed to join scheduler")
