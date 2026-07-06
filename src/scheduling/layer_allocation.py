@@ -346,7 +346,14 @@ class BaseLayerAllocator:
         nodes = (
             pipeline_nodes
             if assume_sorted
-            else sorted(pipeline_nodes, key=lambda n: n.get_decoder_layer_capacity(), reverse=True)
+            # Identical hardware ties on capacity, and Python's stable sort then preserves
+            # racy join/insertion order — a different stage permutation every bring-up,
+            # which defeats any pre-staged weight cache. Tie-break on node_id so equal
+            # fleets get a deterministic, join-order-independent pipeline order.
+            else sorted(
+                pipeline_nodes,
+                key=lambda n: (-n.get_decoder_layer_capacity(), n.node_id),
+            )
         )
         n = len(nodes)
 
