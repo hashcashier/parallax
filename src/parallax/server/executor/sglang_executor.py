@@ -402,7 +402,19 @@ class SGLExecutor(BaseExecutor):
                         self.finished_batch.append(req)
                 else:
                     # This is an active request, add it to the scheduler queue to be processed.
-                    self.scheduler.enque_request(req)
+                    try:
+                        self.scheduler.enque_request(req)
+                    except ValueError as e:
+                        # A decode-phase request whose admission record is gone belongs
+                        # to a request that was aborted/evicted on this stage (client
+                        # disconnect races the in-flight pipeline hop). Raising here
+                        # killed the WHOLE executor group -> node_leave -> global
+                        # standby reboot -> (upstream) scheduler deadlock. Drop the
+                        # stale request instead; the client already gave up on it.
+                        logger.warning(
+                            f"Dropping un-admitted request {req.request_id}: {e}"
+                        )
+                        self.release_and_evict_request(req.request_id)
 
     def process_batch(self, prepared_inputs: Dict[str, Any], return_decoded_tokens: bool = True):
         """Process a batch of requests in SGLang."""
