@@ -293,7 +293,9 @@ def form_sgl_server_args(
             # ServerArgs.__post_init__ may already have materialized the explicit
             # capture ladder (cuda_graph_bs) from the DEFAULT max — and the explicit
             # list wins over cuda_graph_max_bs. Pin the ladder itself.
-            sgl_server_args.cuda_graph_bs = [b for b in (1, 2, 4, 8, 16, 24, 32) if b <= cap]
+            sgl_server_args.cuda_graph_bs = [
+                b for b in (1, 2, 4, 8, 16, 24, 32, 48, 64) if b <= cap
+            ]
         except ValueError:
             logger.warning("ignoring invalid PARALLAX_CUDA_GRAPH_MAX_BS=%r", cg_max_bs)
     return sgl_server_args
