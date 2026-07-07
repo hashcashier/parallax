@@ -532,51 +532,67 @@ class GradientServer:
             exit(1)
 
         if self.scheduler_addr is not None:  # central scheduler mode
-            try:
-                self.scheduler_stub = RPCConnectionHandler(self.lattica, None, None).get_stub(
-                    self.scheduler_peer_id
-                )
-                node_info = self.get_node_info()
-                if node_info == {}:
-                    logger.error("Failed to get node info, try again after 10 seconds")
-                    self.lattica.close()
-                    self.lattica = None
-                    time.sleep(10)
-                    return self.run()
+            # The scheduler HOLDS each node_join response until ALL bootstrap nodes have
+            # registered, but a lattica RPC channel only survives seconds and the client
+            # retries a dead channel at most 3 times (lattica retry_with_backoff,
+            # max_retries=3). Any registration whose hold outlives that budget used to
+            # surface as an exception here and exit(1) — the scheduler then processed the
+            # queued leave RIGHT AFTER allocating, rebooting the whole pipeline to standby
+            # in an endless churn loop (observed for hours on 5-node GLM-5.2 bring-ups).
+            # The scheduler tolerates duplicate node_join from the same peer id, so the
+            # correct behavior is to RE-SEND the join on failure — registration must not
+            # depend on channel luck.
+            _jt = self.join_timeout if self.join_timeout and self.join_timeout > 0 else 31536000
+            join_deadline = time.time() + _jt
+            response = None
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    self.scheduler_stub = RPCConnectionHandler(self.lattica, None, None).get_stub(
+                        self.scheduler_peer_id
+                    )
+                    node_info = self.get_node_info()
+                    if node_info == {}:
+                        logger.error("Failed to get node info, try again after 10 seconds")
+                        self.lattica.close()
+                        self.lattica = None
+                        time.sleep(10)
+                        return self.run()
 
-                if self.manual_layer_assignment:
-                    node_info["manual_layer_assignment"] = True
+                    if self.manual_layer_assignment:
+                        node_info["manual_layer_assignment"] = True
 
-                response = self.scheduler_stub.node_join(node_info)
-                # 0/negative -> wait "forever": at scale (8+ nodes, big shards) workers
-                # cannot all node_join within a fixed window; the scheduler holds each
-                # response until bootstrap, so a hard timeout kills healthy late joiners.
-                # lattica's result(timeout=) is a SECONDS int and REJECTS None
-                # ('NoneType' cannot be interpreted as an integer), so "disabled" means a
-                # large finite wait — 1 year, well beyond any bootstrap and safe from
-                # deadline overflow. Driver-side liveness sweeps catch a genuinely dead ring.
-                _jt = self.join_timeout if self.join_timeout and self.join_timeout > 0 else 31536000
-                response = response.result(timeout=_jt)
-                if response == {}:
-                    logger.error("Failed to join scheduler")
-                    exit(1)
+                    fut = self.scheduler_stub.node_join(node_info)
+                    # lattica's result(timeout=) is a SECONDS int and REJECTS None, so
+                    # "wait forever" = a large finite wait; the per-call wait is bounded
+                    # by the channel budget anyway — the outer loop re-sends on failure.
+                    response = fut.result(timeout=max(1, int(join_deadline - time.time())))
+                    if response == {}:
+                        logger.error("Failed to join scheduler (empty allocation response)")
+                        exit(1)
+                    break
+                except Exception as e:  # noqa: BLE001 — channel died mid-hold: re-send
+                    if time.time() >= join_deadline:
+                        logger.exception(f"Error in join scheduler (deadline exceeded): {e}")
+                        exit(1)
+                    logger.warning(
+                        f"node_join attempt {attempt} failed ({e}); re-sending registration"
+                    )
+                    time.sleep(min(5.0, 0.5 * attempt))
 
-                logger.info(f"Join scheduler response: {response}")
+            logger.info(f"Join scheduler response: {response}")
 
-                if not self.manual_layer_assignment:
-                    self.block_start_index = response.get("start_layer")
-                    self.block_end_index = response.get("end_layer")
-                self.model_name = response.get("model_name")
-                self.tp_size = response.get("tp_size")
-                self.enable_weight_refit = response.get("enable_weight_refit")
-                self.weight_refit_mode = response.get("weight_refit_mode")
+            if not self.manual_layer_assignment:
+                self.block_start_index = response.get("start_layer")
+                self.block_end_index = response.get("end_layer")
+            self.model_name = response.get("model_name")
+            self.tp_size = response.get("tp_size")
+            self.enable_weight_refit = response.get("enable_weight_refit")
+            self.weight_refit_mode = response.get("weight_refit_mode")
 
-                # Sync to shared state if available
-                self._sync_to_shared_state()
-
-            except Exception as e:
-                logger.exception(f"Error in join scheduler: {e}")
-                exit(1)
+            # Sync to shared state if available
+            self._sync_to_shared_state()
         else:  # no scheduler mode
             self.start_routing_table_updater()  # thread
 
