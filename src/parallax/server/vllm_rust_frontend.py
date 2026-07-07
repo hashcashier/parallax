@@ -82,8 +82,40 @@ def _runtime_args_json(args) -> str:
     return json.dumps(runtime_args, separators=(",", ":"))
 
 
+def _cleanup_stale_ipc_endpoints(*addrs: Optional[str]) -> None:
+    """Remove ipc:// socket files left behind by an uncleanly-terminated frontend.
+
+    ZMQ only unlinks its ipc socket files on graceful context teardown; a SIGTERM/SIGKILL
+    (which is how the executor-reload loop stops the frontend) leaves the files on disk,
+    and the NEXT frontend's bind on the same path fails with EADDRINUSE — the frontend
+    exits, nothing listens on the HTTP port, and every completion 502s even though the
+    whole pipeline is healthy. Probe each path; unlink it only when no live binder answers.
+    """
+    for addr in addrs:
+        if not addr or not addr.startswith("ipc://"):
+            continue
+        path = addr[len("ipc://") :]
+        if not os.path.exists(path):
+            continue
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.settimeout(0.5)
+        try:
+            probe.connect(path)
+        except OSError:
+            try:
+                os.unlink(path)
+                logger.warning("Removed stale frontend ipc socket %s", path)
+            except OSError:
+                pass
+        finally:
+            probe.close()
+
+
 def launch_vllm_rust_frontend(args) -> VllmRustFrontendProcess:
     """Launch `vllm-rs frontend` as Parallax's only HTTP frontend."""
+    _cleanup_stale_ipc_endpoints(
+        getattr(args, "executor_input_ipc", None), getattr(args, "executor_output_ipc", None)
+    )
     binary = resolve_vllm_rs_binary()
     listener = _bind_listener_socket(args.host, args.port)
     listen_fd = listener.fileno()
