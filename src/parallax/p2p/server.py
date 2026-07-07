@@ -77,6 +77,10 @@ class ServerInfo:
 
 
 def send_notify(notify_url, block_start_index, block_end_index, request, status):
+    # With fast-ack joins the connection handler can exist before the allocation
+    # arrives; a request racing that window must not crash the RPC on None indices.
+    if block_start_index is None or block_end_index is None:
+        block_start_index, block_end_index = 0, 0
     payload = [
         {
             "session_id": req.rid,
@@ -847,6 +851,12 @@ class GradientServer:
                                         # Update layer allocation
                                         self.block_start_index = start_layer
                                         self.block_end_index = end_layer
+                                        # the connection handler was constructed at join
+                                        # time (possibly with None indices under fast-ack
+                                        # joins) and keeps its own copies — sync them
+                                        if getattr(self, "connection_handler", None) is not None:
+                                            self.connection_handler.block_start_index = start_layer
+                                            self.connection_handler.block_end_index = end_layer
                                         if model_name:
                                             self.model_name = model_name
                                         # With allocation-less join acks (fast-ack join),
