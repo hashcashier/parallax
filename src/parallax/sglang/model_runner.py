@@ -240,9 +240,28 @@ def form_sgl_server_args(
     max_num_tokens_per_batch: int = 16384,
 ):
     """Creates a SGL ServerArgs object"""
+    # Env-gated serving overrides that must be present at ServerArgs CONSTRUCTION time
+    # (__post_init__ resolves NSA attention backends from kv_cache_dtype and pool sizing
+    # reads max_running_requests, so post-hoc attribute writes would be ignored):
+    #  * PARALLAX_MAX_RUNNING_REQUESTS — sglang's _resolve_max_num_reqs floors the default
+    #    at 2048 requests, and the ReqToToken-family pools scale as reqs x context_len
+    #    (~2.2GB/GPU at a 266k context). Pin to the deployment's true concurrency cap.
+    #  * PARALLAX_KV_CACHE_DTYPE — NSA/DSA models (GLM-5.x) store MLA kv_c in fp8 with
+    #    per-block scales + bf16 rope when kv_cache_dtype=fp8_e4m3, roughly halving the
+    #    per-token KV cost; required to fit a 262k-token pool on 16-layer 32GB stages.
+    max_running_requests = None
+    _mrr = os.environ.get("PARALLAX_MAX_RUNNING_REQUESTS")
+    if _mrr:
+        try:
+            max_running_requests = int(_mrr)
+        except ValueError:
+            logger.warning("ignoring invalid PARALLAX_MAX_RUNNING_REQUESTS=%r", _mrr)
+    kv_cache_dtype = os.environ.get("PARALLAX_KV_CACHE_DTYPE") or "auto"
     sgl_server_args = ServerArgs(
         model_path=model_path,
         dtype=dtype,
+        kv_cache_dtype=kv_cache_dtype,
+        max_running_requests=max_running_requests,
         attention_backend=attention_backend,
         enable_dp_attention=enable_dp_attention,
         page_size=kv_block_size,
