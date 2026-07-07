@@ -24,8 +24,29 @@ indexer_types and let sglang's pattern branch take over.
 """
 
 import logging
+import os
 
 logger = logging.getLogger(__name__)
+
+
+def apply_fp8_gemm_backend_override():
+    """Env-gated FP8 GEMM backend override (PARALLAX_FP8_GEMM_BACKEND=triton|cutlass|...).
+
+    sglang 0.5.12's auto selection on SM120 (RTX 5090) picks FlashInfer CUTLASS groupwise
+    FP8, whose scale-layout check rejects sglang's blockwise scales for non-128-multiple
+    output dims — GLM-5.2-FP8's fused_qkv_a_proj is [2624, 6144] and dies at warmup with
+    "expects B scale layout (k//block_k, n//block_n) ... got (21, 48); expected (48, 20)".
+    Parallax builds ServerArgs itself and never plumbs fp8_gemm_runner_backend, so set the
+    module global directly (get_fp8_gemm_runner_backend() falls back to it)."""
+    backend = os.environ.get("PARALLAX_FP8_GEMM_BACKEND")
+    if not backend:
+        return
+    try:
+        from sglang.srt.layers.quantization import fp8_utils
+        fp8_utils.FP8_GEMM_RUNNER_BACKEND = fp8_utils.Fp8GemmRunnerBackend(backend)
+        logger.info("[fp8] forced FP8 GEMM runner backend = %s", backend)
+    except Exception as e:  # noqa: BLE001 — never block startup on an optional override
+        logger.warning("[fp8] could not force FP8 GEMM backend %r: %s", backend, e)
 
 
 def apply_glm_moe_dsa_config_monkey_patch():

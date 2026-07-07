@@ -54,7 +54,9 @@ def apply_parallax_sglang_monkey_patch():
     apply_glm4_moe_monkey_patch()
 
     from parallax.sglang.monkey_patch_utils.glm_moe_dsa_config import (
+        apply_fp8_gemm_backend_override,
         apply_glm_moe_dsa_config_monkey_patch,
     )
 
     apply_glm_moe_dsa_config_monkey_patch()
+    apply_fp8_gemm_backend_override()
