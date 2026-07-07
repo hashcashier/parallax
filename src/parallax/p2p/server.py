@@ -568,9 +568,12 @@ class GradientServer:
                     # "wait forever" = a large finite wait; the per-call wait is bounded
                     # by the channel budget anyway — the outer loop re-sends on failure.
                     response = fut.result(timeout=max(1, int(join_deadline - time.time())))
-                    if response == {}:
-                        logger.error("Failed to join scheduler (empty allocation response)")
-                        exit(1)
+                    if response is None:
+                        raise RuntimeError("node_join returned None")
+                    # The scheduler now acks registration immediately ({"registered": True}
+                    # or an allocation if one already exists); an allocation-less ack is
+                    # SUCCESS — the allocation arrives via heartbeat, which triggers the
+                    # executor load. Only a None/errored response is a failure.
                     break
                 except Exception as e:  # noqa: BLE001 — channel died mid-hold: re-send
                     if time.time() >= join_deadline:
@@ -583,13 +586,16 @@ class GradientServer:
 
             logger.info(f"Join scheduler response: {response}")
 
-            if not self.manual_layer_assignment:
-                self.block_start_index = response.get("start_layer")
-                self.block_end_index = response.get("end_layer")
-            self.model_name = response.get("model_name")
-            self.tp_size = response.get("tp_size")
-            self.enable_weight_refit = response.get("enable_weight_refit")
-            self.weight_refit_mode = response.get("weight_refit_mode")
+            if response.get("start_layer") is not None:
+                if not self.manual_layer_assignment:
+                    self.block_start_index = response.get("start_layer")
+                    self.block_end_index = response.get("end_layer")
+                self.model_name = response.get("model_name")
+                self.tp_size = response.get("tp_size")
+                self.enable_weight_refit = response.get("enable_weight_refit")
+                self.weight_refit_mode = response.get("weight_refit_mode")
+            else:
+                logger.info("Registered with scheduler; awaiting layer allocation via heartbeat")
 
             # Sync to shared state if available
             self._sync_to_shared_state()
@@ -843,6 +849,18 @@ class GradientServer:
                                         self.block_end_index = end_layer
                                         if model_name:
                                             self.model_name = model_name
+                                        # With allocation-less join acks (fast-ack join),
+                                        # tp_size/refit config first arrives HERE.
+                                        if response.get("tp_size") is not None:
+                                            self.tp_size = response.get("tp_size")
+                                        if response.get("enable_weight_refit") is not None:
+                                            self.enable_weight_refit = response.get(
+                                                "enable_weight_refit"
+                                            )
+                                        if response.get("weight_refit_mode") is not None:
+                                            self.weight_refit_mode = response.get(
+                                                "weight_refit_mode"
+                                            )
                                         # Set flag to trigger executor reload
                                         self._layer_allocation_changed = True
                                         # Set status to INITIALIZING to prevent scheduler from sending requests

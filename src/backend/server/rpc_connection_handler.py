@@ -50,7 +50,15 @@ class RPCConnectionHandler(ConnectionHandler):
             node = self.build_node(message)
             self.scheduler.enqueue_join(node)
 
-            response = self.wait_layer_allocation(node.node_id, wait_seconds=300)
+            # Do NOT hold the RPC open until bootstrap: a lattica channel survives only
+            # seconds while a full-fleet bootstrap can take minutes, so held responses
+            # died mid-wait, workers re-sent node_join, and the duplicate join reset the
+            # just-made allocation — an endless churn loop. Ack registration fast; the
+            # allocation reaches the worker via its heartbeat (which already triggers
+            # the executor (re)load when an allocation arrives or changes).
+            response = self.wait_layer_allocation(node.node_id, wait_seconds=2)
+            if not response:
+                response = {"registered": True}
             logger.debug(f"node_join response: {response}")
             return response
         except Exception as e:
