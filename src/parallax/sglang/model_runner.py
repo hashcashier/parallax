@@ -262,6 +262,16 @@ def form_sgl_server_args(
         dp_size=dp_size,
         max_total_tokens=max_num_tokens_per_batch,
     )
+    # sglang's CUDA-graph capture ladder is sized by cuda_graph_max_bs, NOT by
+    # max_running_requests — on 8x32GB nodes serving 16 GLM-5.2-FP8 layers the default
+    # ladder (14 sizes up to bs~72+) OOM'd capture with weights+KV resident. Env-gated
+    # override so deployments can pin it to their real concurrency cap.
+    cg_max_bs = os.environ.get("PARALLAX_CUDA_GRAPH_MAX_BS")
+    if cg_max_bs:
+        try:
+            sgl_server_args.cuda_graph_max_bs = int(cg_max_bs)
+        except ValueError:
+            logger.warning("ignoring invalid PARALLAX_CUDA_GRAPH_MAX_BS=%r", cg_max_bs)
     return sgl_server_args
 
 
